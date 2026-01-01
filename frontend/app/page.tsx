@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from "react";
-import { apiGet, apiPost } from "./lib/api";
+import { backend } from "./lib/api";
 
 type StackItem = {
   name: string;
@@ -22,10 +22,14 @@ export default function StacksPage() {
   const [forgeDir, setForgeDir] = useState<string>("");
   const [log, setLog] = useState<string>("");
 
-  useEffect(() => {
-    apiGet<{ stacks: StackItem[] }>("/api/stacks").then((d) => setStacks(d.stacks));
-  }, []);
-
+ 
+useEffect(() => {
+    async function loadStacks() {
+      const d: any = await backend.stacks();
+      setStacks(d.stacks || []);
+    }
+    loadStacks();
+  },[]);
   async function runStack() {
     if (!selected) return;
     const varsObj: any = {};
@@ -47,7 +51,7 @@ export default function StacksPage() {
 
     setLog("Running…");
     try {
-      const res: any = await apiPost("/api/stacks/run", payload);
+      const res: any = await backend.runStack(selected.name, engine, payload);
       setLog((res.stdout || "") + "\n" + (res.stderr || ""));
     } catch (e: any) {
       setLog(String(e?.message || e));

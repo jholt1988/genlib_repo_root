@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from "react";
-import { apiPost } from "../lib/api";
+import { backend } from "../lib/api";
 
 export default function AgentPage() {
   const [text, setText] = useState<string>("cinematic portrait of a man 50mm, soft light");
@@ -14,7 +14,7 @@ export default function AgentPage() {
   async function runAgent() {
     setLog("Running…");
     try {
-      const res: any = await apiPost("/api/agent/run", {
+      const res: any = await backend.agentRun({
         text,
         planners: planners.split(",").map(s => s.trim()).filter(Boolean),
         out,

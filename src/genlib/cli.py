@@ -6,6 +6,16 @@ from genlib.stack.cli import stack_cli
 from genlib.agents.cli import agent_cli
 from genlib.stack.commands import init_cmd
 from genlib.engines.remote import remote_cli
+from genlib.tui.app import GenLibTUI
+
+def run_tui(_args):
+    """
+    Launch the GenLib TUI.
+    No arguments by design.
+    """
+    app = GenLibTUI()
+    app.run()
+
 
 
 def main():
@@ -47,8 +57,14 @@ def main():
     agent_parser = subparsers.add_parser("agent", help="Agent: natural language -> plan/run")
     agent_cli(agent_parser)
 
+    tui_parser = subparsers.add_parser("tui", help="Launch the GenLib terminal UI")
+    tui_parser.set_defaults(func=run_tui)
+
+
     args = parser.parse_args()
     args.func(args)
+
+    
 
 if __name__ == "__main__":
     main()

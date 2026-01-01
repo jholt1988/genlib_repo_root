@@ -1,19 +1,17 @@
 'use client';
 
 import { useEffect, useState } from "react";
-import { apiGet } from "../lib/api";
+import { backend } from "../lib/api";
 
 type Job = any;
 
-export default function JobsPage() {
-  const [jobs, setJobs] = useState<Job[]>([]);
+
+export default async function JobsPage() {
+  const { jobs } = await backend.jobs();
+ 
   const [err, setErr] = useState<string>("");
 
-  useEffect(() => {
-    apiGet<{ jobs: Job[] }>("/api/jobs")
-      .then(d => setJobs(d.jobs.reverse()))
-      .catch(e => setErr(String(e)));
-  }, []);
+  
 
   return (
     <div style={{ maxWidth: 1100 }}>

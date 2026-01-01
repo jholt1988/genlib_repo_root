@@ -7,6 +7,8 @@ from genlib.tui.screens.catalog import CatalogScreen
 from genlib.tui.screens.stacks import StackScreen
 from genlib.tui.screens.agents import AgentScreen
 from genlib.tui.screens.gallery import GalleryScreen
+from genlib.tui.screens.jobs import JobsScreen
+
 
 
 class GenLibTUI(App):
@@ -17,6 +19,7 @@ class GenLibTUI(App):
         ("s", "stacks", "Stacks"),
         ("a", "agents", "Agents"),
         ("g", "gallery", "Gallery"),
+        ("j", "jobs", "Jobs"),
         ("q", "quit", "Quit"),
     ]
 
@@ -38,3 +41,7 @@ class GenLibTUI(App):
 
     def action_gallery(self):
         self.push_screen(GalleryScreen())
+
+    def action_jobs(self):
+         self.push_screen(JobsScreen())
+       

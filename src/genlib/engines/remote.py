@@ -1,14 +1,19 @@
 from __future__ import annotations
 import os, re, json
+from dotenv import load_dotenv
 from pathlib import Path
-from typing import Any, Dict, Optional
-from urllib.parse import urlencode
+from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from genlib.utils import cache_dir, cache_key, cache_get, cache_set
 
 
 CIVITAI_BASE_URL = "https://civitai.com"
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(env_path)
+
+token = os.environ.get("TOKEN")
 
 def _auth_headers(token: Optional[str]) -> Dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
@@ -89,7 +94,17 @@ def remote_cli(parser):
     search.add_argument("--sort", help="Sort order. Accepts 'Most Reactions', 'Most Comments', or 'Newest' (case-insensitive, spaces optional).")
     search.add_argument("--period", help="Time period. Accepts AllTime, Year, Month, Week, Day (case-insensitive).")
     search.add_argument("--page", type=int, help="Page number to fetch (1-based).")
+    search.add_argument("--tag", type=str, help="Comma-separated list of tags to filter by.")
+    search.add_argument("--types", type=str, help="Type of Model (i.e checkpoint, LORA, VAE)")
     search.set_defaults(func=search_cmd)
+
+    # New command: download model into sd-forge directory based on type
+    download = sub.add_parser("download", help="Download a model's primary file into sd-forge appropriate directory (loras/checkpoints)")
+    download.add_argument("model_id", help="CivitAI model id")
+    download.add_argument("--version-id", type=int, dest="version_id", help="Specific modelVersion id (optional)")
+    download.add_argument("--out-dir", help="Override sd-forge base directory (defaults to $SD_FORGE_DIR or ~/.sd-forge)")
+    download.add_argument("--force", action="store_true", help="Overwrite existing file if present")
+    download.set_defaults(func=download_cmd)
 
 def _client() -> CivitAIClient:
     token = os.environ.get("CIVITAI_TOKEN") or os.environ.get("CIVITAI_API_KEY")
@@ -169,6 +184,12 @@ def search_cmd(args):
     if getattr(args, "model_version_id", None) is not None:
         params["modelVersionId"] = int(args.model_version_id)
 
+    if getattr(args, "tag", None) is not None:
+        params["tag"] = args.tag
+
+    if getattr(args, "types", None) is not None:
+        params["types"] = args.types
+
     # username
     if getattr(args, "username", None):
         params["username"] = args.username
@@ -195,7 +216,7 @@ def search_cmd(args):
         params["page"] = page
 
     # Build URL with query string
-    base = f"{CIVITAI_BASE_URL}/api/v1/images"
+    base = f"{CIVITAI_BASE_URL}/api/v1/models"
     if params:
         qs = urlencode(params)
         url = f"{base}?{qs}"
@@ -213,3 +234,197 @@ def search_cmd(args):
 
     # Print result
     print(json.dumps(data, indent=2))
+
+
+# --- New helpers for downloading models into sd-forge ---
+
+def _choose_version(model: Dict[str, Any], version_id: Optional[int]) -> Optional[Dict[str, Any]]:
+    versions = model.get("modelVersions") or []
+    if not versions:
+        return None
+    if version_id is not None:
+        for v in versions:
+            if v.get("id") == int(version_id) or v.get("id") == version_id:
+                return v
+        # not found
+        return None
+    # prefer the first (API often orders by newest)
+    return versions[0]
+
+def _choose_file_for_version(version: Dict[str, Any], model_type_hint: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    Heuristic to pick the best file from a modelVersion.
+    Prefers safetensors, then ckpt/pt/pth, and for lora hints filenames containing 'lora'.
+    """
+    files = version.get("files") or []
+    if not files:
+        return None
+
+    # Normalize file entries
+    def filename(f):
+        return (f.get("name") or f.get("fileName") or "").lower()
+
+    # candidate scoring
+    preferred_exts = [".safetensors", ".ckpt", ".pt", ".pth", ".bin"]
+    candidates: list[Tuple[int, Dict[str, Any]]] = []
+
+    for f in files:
+        fname = filename(f)
+        score = 0
+        # prefer lora-identifying filenames if model_type_hint == "lora"
+        if model_type_hint == "lora" and "lora" in fname:
+            score += 50
+        # extension preference
+        for i, ext in enumerate(preferred_exts):
+            if fname.endswith(ext):
+                score += (100 - i)  # earlier ext = higher score
+                break
+        # small bonus for shorter file names (heuristic for primary file)
+        score += max(0, 10 - len(fname.split()))
+        candidates.append((score, f))
+
+    # fallback: if no ext matched, return first file
+    if not any(c[0] for c in candidates):
+        return files[0]
+
+    # return highest score
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+def _sd_forge_base(out_dir: Optional[str]) -> Path:
+    # Allow override via arg, then env var, then default ~/.sd-forge
+    if out_dir:
+        base = Path(out_dir)
+    else:
+        base = Path(os.environ.get("SD_FORGE_DIR", "~/.sd-forge")).expanduser()
+    return base
+
+def _target_path_for_model(
+    base: Path,
+    model: Dict[str, Any],
+    version: Dict[str, Any],
+    file_entry: Dict[str, Any],
+) -> Path:
+    mtype = (model.get("type") or "").lower().strip()
+
+    # ---- API type → Forge folder mapping ----
+    if mtype in {"lora", "lycoris", "locon", "loha"}:
+        sub = Path("models/Lora")
+
+    elif mtype in {"checkpoint", "model", "sd", "sdxl"}:
+        sub = Path("models/Stable-diffusion")
+
+    elif mtype in {"textualinversion", "textual_inversion", "embedding"}:
+        sub = Path("embeddings")
+
+    elif mtype == "hypernetwork":
+        sub = Path("models/hypernetworks")
+
+    elif mtype in {"controlnet", "pose", "openpose", "dwpose"}:
+        sub = Path("models/ControlNet")
+
+    elif mtype == "vae":
+        sub = Path("models/VAE")
+
+    elif mtype in {"vae-approx", "vae_approx"}:
+        sub = Path("models/VAE-approx")
+
+    elif mtype in {"esrgan", "upscaler"}:
+        sub = Path("models/ESRGAN")
+
+    elif mtype == "svd":
+        sub = Path("models/svd")
+
+    elif mtype in {"text_encoder", "clip"}:
+        sub = Path("models/text_encoder")
+
+    elif mtype in {"z123", "zero123"}:
+        sub = Path("models/z123")
+
+    elif mtype == "deepbooru":
+        sub = Path("models/deepbooru")
+
+    elif mtype == "karlo":
+        sub = Path("models/karlo")
+
+    else:
+        # Unknown / future types
+        sub = Path("models/_unsorted")
+
+    # ---- Ensure directories exist ----
+    dest_dir = base / sub
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- Determine filename ----
+    fname = (
+        file_entry.get("name")
+        or file_entry.get("fileName")
+        or ""
+    )
+
+    if not fname:
+        url = file_entry.get("downloadUrl") or file_entry.get("url") or ""
+        parsed = urlparse(url)
+        fname = Path(parsed.path).name
+
+    if not fname:
+        fname = f"{model.get('id')}-{version.get('id')}"
+
+    return dest_dir / fname
+
+def _download_url_to_file(url: str, headers: Dict[str, str], dest: Path, force: bool = False) -> None:
+    if dest.exists() and not force:
+        print(f"File already exists: {dest} (use --force to overwrite)")
+        return
+    req = Request(url, headers=headers, method="GET")
+    with urlopen(req, timeout=120) as r:
+        # Attempt streaming write
+        dest_tmp = dest.with_suffix(dest.suffix + ".part")
+        with open(dest_tmp, "wb") as fh:
+            chunk_size = 64 * 1024
+            while True:
+                chunk = r.read(chunk_size)
+                if not chunk:
+                    break
+                fh.write(chunk)
+        dest_tmp.rename(dest)
+    print(f"✅ Downloaded to {dest}")
+
+
+def download_cmd(args):
+    """
+    Download a model's primary file and place it into the sd-forge directory
+    under models/loras or models/checkpoints depending on type.
+    """
+    client = _client()
+    model = client.get_model(args.model_id)
+    # API wrapper may include a _cached key — keep using model dict as-is
+    version = _choose_version(model, getattr(args, "version_id", None))
+    if version is None:
+        print("No modelVersions found (or specified version not found). Aborting.")
+        raise SystemExit(1)
+
+    mtype = (model.get("type") or "").lower()
+    file_entry = _choose_file_for_version(version, mtype)
+    if file_entry is None:
+        print("No downloadable files found for selected version. Aborting.")
+        raise SystemExit(1)
+
+    download_url = file_entry.get("downloadUrl") or file_entry.get("url") or file_entry.get("download_url")
+    if not download_url:
+        print("Selected file has no download URL. Aborting.")
+        raise SystemExit(1)
+
+    base = _sd_forge_base(getattr(args, "out_dir", None))
+    dest = _target_path_for_model(base, model, version, file_entry)
+
+    headers = {"User-Agent": "genlib/remote.py", **_auth_headers(client.token)}
+
+    try:
+        _download_url_to_file(download_url, headers, dest, force=bool(getattr(args, "force", False)))
+    except Exception as e:
+        print(f"Error downloading file: {e}")
+        raise
+
+    # Print a suggestion to the user where the file was saved and what they may want to do next.
+    print(f"Model '{model.get('name')}' (type={mtype}) version {version.get('id')} saved to {dest}")

@@ -1,22 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+
+from textual.containers import ScrollableContainer, Vertical
 from textual.screen import Screen
-from textual.containers import Vertical, ScrollableContainer
 from textual.widgets import Static
-from rich.console import Console
-from rich.panel import Panel
-from rich.image import Image
 
 
 class GalleryScreen(Screen):
-    '''
-    Rich image gallery for generated outputs.
-    Reads images from outputs/ directory (recursively).
-    '''
+    """Display generated images that live under an optional job directory."""
+
     BINDINGS = [
         ("q", "app.pop_screen", "Back"),
     ]
+
+    def __init__(self, job_id: str | None = None):
+        super().__init__()
+        self.job_id = job_id
 
     def compose(self):
         with Vertical():
@@ -29,8 +29,10 @@ class GalleryScreen(Screen):
 
     def load_images(self):
         out = self.query_one("#gallery-content", Static)
+
         output_dir = Path("outputs")
-        console = Console(record=True)
+        if self.job_id:
+            output_dir /= self.job_id
 
         if not output_dir.exists():
             out.update("No outputs/ directory found.")
@@ -41,10 +43,7 @@ class GalleryScreen(Screen):
             out.update("No images found in outputs/.")
             return
 
-        for img_path in images[:20]:  # limit for safety
-            try:
-                console.print(Panel(Image.from_path(img_path), title=str(img_path)))
-            except Exception as e:
-                console.print(f"[red]Failed to load {img_path}: {e}[/red]")
-
-        out.update(console.export_text())
+        entries = [f"- {img_path}" for img_path in images[:20]]
+        if len(images) > 20:
+            entries.append(f"... and {len(images) - 20} more")
+        out.update("\n".join(entries))
