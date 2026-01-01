@@ -1,0 +1,2 @@
+[console_scripts]
+genlib = genlib.cli:main
