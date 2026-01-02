@@ -69,3 +69,12 @@ class BackendClient:
             if exc.response is not None and exc.response.status_code == 404:
                 return self._post("/stacks/run", payload)
             raise
+
+    def stream_job_logs(self, job_id: str):
+        resp = requests.get(
+            f"{self.base_url}/api/jobs/{job_id}/stream",
+            stream=True,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.iter_lines(decode_unicode=True)

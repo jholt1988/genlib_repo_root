@@ -1,7 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 import subprocess, json, os
-
+import 
 class ForgeError(Exception):
     pass
 
@@ -32,3 +32,9 @@ def run_forge(prompt: str, negative: str, params: dict, outdir: Path, forge_dir:
     proc = subprocess.run(cmd, cwd=forge_dir, env=env)
     if proc.returncode != 0:
         raise ForgeError(f"Forge failed with code {proc.returncode}")
+
+def start_forge():
+    forge_dir = os.environ.get("FORGE_DIR")
+    cmd = [
+
+    ]

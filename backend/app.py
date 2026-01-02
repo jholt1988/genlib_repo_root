@@ -2,12 +2,14 @@ from __future__ import annotations
 import os, json, subprocess
 from pathlib import Path
 from typing import Any, Dict, List
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from job_queue import JobQueue
 from typing_extensions import Sentinel
+
+import json
 
 STACKS_DIR = Path(os.environ.get("GENLIB_STACKS_DIR","stacks")).expanduser().resolve()
 OUTPUTS_ROOT = Path(os.environ.get("GENLIB_OUTPUTS_ROOT","outputs")).expanduser().resolve()
@@ -90,3 +92,27 @@ def gallery(path: str = Query("outputs")):
         if p.suffix.lower() in {".png",".jpg",".jpeg",".webp"}:
             imgs.append("/outputs/"+p.relative_to(OUTPUTS_ROOT).as_posix())
     return {"images":imgs}
+
+
+@app.get("/api/jobs/{jid}/stream")
+def stream_job(jid: str):
+    job = queue.get(jid)
+    if not job:
+        raise HTTPException(404, "job not found")
+
+    def event_stream():
+        for raw in queue.stream(jid):
+            if not raw:
+                continue
+            channel, _, payload = raw.partition(":")
+            payload = payload or ""
+            event = {
+                "job_id": jid,
+                "channel": channel,
+                "message": payload,
+                "status": job.get("status"),
+            }
+            yield f"data: {json.dumps(event)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

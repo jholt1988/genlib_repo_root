@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
+from typing import Any
+
 from textual.screen import Screen
 from textual.containers import Vertical, ScrollableContainer
 from textual.widgets import Static
@@ -19,6 +22,9 @@ class JobDetailScreen(Screen):
         super().__init__()
         self.job_id = job_id
         self.client = BackendClient()
+        self._stream_stop = threading.Event()
+        self._stream_thread: threading.Thread | None = None
+        self._log_cache: list[str] = []
 
     def compose(self):
         with Vertical():
@@ -48,6 +54,50 @@ class JobDetailScreen(Screen):
             f"Stderr: {job['stderr_log']}",
         ]
         self.query_one("#job-body", Static).update("\n".join(lines))
+        self._start_stream()
+
+    def on_unmount(self):
+        self._stream_stop.set()
+        if self._stream_thread and self._stream_thread.is_alive():
+            self._stream_thread.join(timeout=0.1)
 
     def action_gallery(self):
         self.app.push_screen(GalleryScreen(self.job_id))
+
+    def _start_stream(self):
+        if self._stream_thread and self._stream_thread.is_alive():
+            return
+
+        def run():
+            try:
+                for raw in self.client.stream_job_logs(self.job_id):
+                    if self._stream_stop.is_set():
+                        break
+                    if not raw.startswith("data:"):
+                        continue
+                    payload = raw.split("data:", 1)[1].strip()
+                    if not payload:
+                        continue
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        event = {"message": payload}
+                    self.call_from_thread(self._handle_stream_event, event)
+            except Exception as exc:
+                self.call_from_thread(
+                    self._handle_stream_event,
+                    {"channel": "error", "message": str(exc)},
+                )
+
+        self._stream_thread = threading.Thread(target=run, daemon=True)
+        self._stream_thread.start()
+
+    def _handle_stream_event(self, event: dict[str, Any]):
+        channel = event.get("channel", "info")
+        message = event.get("message", "")
+        log_line = f"[{channel}] {message}"
+        self._log_cache.append(log_line)
+        body = self.query_one("#job-body", Static)
+        body.update(f"{body.renderable}\n{log_line}")
