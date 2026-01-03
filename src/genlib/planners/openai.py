@@ -39,7 +39,7 @@ class OpenAIPlanner:
         self.base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1/responses")
 
     def plan(self, text: str, *, stacks_dir: str = "stacks") -> Plan:
-        key = os.environ("OPENAI_API_KEY")
+        key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_APIKEY") or os.environ.get("OPENAI_KEY")
         if not key:
             raise RuntimeError("OPENAI_API_KEY not set")
 

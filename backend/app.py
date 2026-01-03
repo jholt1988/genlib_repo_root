@@ -1,18 +1,17 @@
 from __future__ import annotations
-import os, json, subprocess
+
+import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List
+
 from fastapi import FastAPI, HTTPException, Query, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
 from job_queue import JobQueue
-from typing_extensions import Sentinel
-
-import json
-
-STACKS_DIR = Path(os.environ.get("GENLIB_STACKS_DIR","stacks")).expanduser().resolve()
-OUTPUTS_ROOT = Path(os.environ.get("GENLIB_OUTPUTS_ROOT","outputs")).expanduser().resolve()
+OUTPUTS_ROOT = Path(os.environ.get("GENLIB_OUTPUTS_ROOT", "outputs")).expanduser().resolve()
 
 app = FastAPI(title="genlib-web", version="2.4.0")
 app.add_middleware(
@@ -25,7 +24,8 @@ app.add_middleware(
 OUTPUTS_ROOT.mkdir(parents=True, exist_ok=True)
 app.mount("/outputs", StaticFiles(directory=str(OUTPUTS_ROOT)), name="outputs")
 
-queue = JobQueue()
+queue = JobQueue(outputs_root=OUTPUTS_ROOT)
+
 
 class StackRun(BaseModel):
     stack: str
@@ -34,64 +34,88 @@ class StackRun(BaseModel):
     out: str | None = None
     engine: str = "forge"
     forge_dir: str | None = None
+    seed: int | None = None
+    stacks_dir: str | None = None
+    models_root: str | None = None
+    catalog_path: str | None = None
+    count: int | None = None
+
 
 class AgentRun(BaseModel):
     text: str
-    planners: List[str] = ["rule","openai","ollama"]
+    planners: List[str] = ["rule", "openai", "ollama"]
     out: str | None = None
     engine: str = "forge"
     forge_dir: str | None = None
 
+
 @app.post("/api/stacks/run")
 def run_stack(req: StackRun):
-    cmd = ["genlib","stack","run",req.stack]
-    for p in req.presets:
-        cmd += ["--preset",p]
-    for k,v in req.vars.items():
-        cmd += ["--var",f"{k}={v}"]
-    if req.out:
-        cmd += ["--out",req.out]
-    cmd += ["--engine",req.engine]
-    if req.engine=="forge":
-        if not req.forge_dir:
-            raise HTTPException(400,"forge_dir required")
-        cmd += ["--forge-dir",req.forge_dir]
-    jid = queue.submit({"type":"stack","stack":req.stack,"cmd":cmd,"out":req.out})
-    return {"job_id":jid}
+    job_data: Dict[str, Any] = {
+        "type": "stack",
+        "stack": req.stack,
+        "presets": req.presets,
+        "vars": req.vars,
+        "out": req.out,
+        "engine": req.engine,
+        "forge_dir": req.forge_dir,
+        "seed": req.seed,
+    }
+    if req.count is not None:
+        job_data["count"] = req.count
+    if req.stacks_dir:
+        job_data["stacks_dir"] = req.stacks_dir
+    if req.models_root:
+        job_data["models_root"] = req.models_root
+    if req.catalog_path:
+        job_data["catalog_path"] = req.catalog_path
+    jid = queue.submit(job_data)
+    return {"job_id": jid}
+
 
 @app.post("/api/agent/run")
 def run_agent(req: AgentRun):
-    cmd = ["genlib","agent","run",req.text,"--planners",",".join(req.planners)]
-    if req.out:
-        cmd += ["--out",req.out]
-    cmd += ["--engine",req.engine]
-    if req.engine=="forge":
-        if not req.forge_dir:
-            raise HTTPException(400,"forge_dir required")
-        cmd += ["--forge-dir",req.forge_dir]
-    jid = queue.submit({"type":"agent","text":req.text,"cmd":cmd,"out":req.out})
-    return {"job_id":jid}
+    raise HTTPException(501, "agent endpoint is not supported by this backend")
+
+
+@app.get("/api/jobs")
+def list_jobs():
+    jobs = sorted(queue.jobs.values(), key=lambda j: j.get("created_ts", 0), reverse=True)
+    return {"jobs": jobs}
+
 
 @app.get("/api/jobs/{jid}")
 def job(jid: str):
     j = queue.get(jid)
     if not j:
-        raise HTTPException(404,"job not found")
+        raise HTTPException(404, "job not found")
     return j
+
+
+@app.post("/api/jobs/{jid}/cancel")
+def cancel_job(jid: str):
+    if not queue.cancel(jid):
+        raise HTTPException(404, "job not found")
+    return {"job_id": jid, "status": "cancelled"}
+
 
 @app.get("/api/gallery")
 def gallery(path: str = Query("outputs")):
     rel = Path(path)
     if rel.is_absolute() or ".." in rel.parts:
-        raise HTTPException(400,"invalid path")
-    root = OUTPUTS_ROOT / rel.relative_to("outputs") if rel.parts and rel.parts[0]=="outputs" else OUTPUTS_ROOT/rel
+        raise HTTPException(400, "invalid path")
+    root = (
+        OUTPUTS_ROOT / rel.relative_to("outputs")
+        if rel.parts and rel.parts[0] == "outputs"
+        else OUTPUTS_ROOT / rel
+    )
     if not root.exists():
-        return {"images":[]}
-    imgs=[]
+        return {"images": []}
+    imgs = []
     for p in root.rglob("*"):
-        if p.suffix.lower() in {".png",".jpg",".jpeg",".webp"}:
-            imgs.append("/outputs/"+p.relative_to(OUTPUTS_ROOT).as_posix())
-    return {"images":imgs}
+        if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+            imgs.append("/outputs/" + p.relative_to(OUTPUTS_ROOT).as_posix())
+    return {"images": imgs}
 
 
 @app.get("/api/jobs/{jid}/stream")

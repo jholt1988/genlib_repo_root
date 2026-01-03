@@ -28,16 +28,16 @@ class BackendClient:
     # ---- Jobs ----
 
     def list_jobs(self) -> list[dict]:
-        return self._get("/jobs")["jobs"]
+        return self._get("/api/jobs")["jobs"]
 
     def get_job(self, job_id: str) -> dict:
-        return self._get(f"/jobs/{job_id}")
+        return self._get(f"/api/jobs/{job_id}")
 
     def create_job(self, stack: str, engine: str = "forge") -> dict:
         return self._post("/jobs", {"stack": stack, "engine": engine})
 
     def cancel_job(self, job_id: str) -> dict:
-        return self._post(f"/jobs/{job_id}/cancel")
+        return self._post(f"/api/jobs/{job_id}/cancel")
 
     # ---- Outputs ----
 

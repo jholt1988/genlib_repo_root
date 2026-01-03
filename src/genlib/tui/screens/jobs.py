@@ -47,7 +47,7 @@ class JobsScreen(Screen):
                 job["stack"],
                 job["status"],
                 job["engine"],
-                str(int(job["created_at"])),
+                str(int(job.get("created_ts", 0))),
             )
 
     def action_refresh(self):

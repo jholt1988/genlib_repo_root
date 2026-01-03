@@ -41,17 +41,29 @@ class JobDetailScreen(Screen):
             except Exception:
                 meta = {"raw": meta}
 
+        def format_ts(key: str) -> str:
+            val = job.get(key)
+            return str(val) if val is not None else "n/a"
+
         lines = [
-            f"Status: {job['status']}",
-            f"Stack: {job['stack']}",
-            f"Engine: {job['engine']}",
+            f"Status: {job.get('status','?')}",
+            f"Stack: {job.get('stack','?')}",
+            f"Engine: {job.get('engine','?')}",
+            f"Created: {format_ts('created_ts')}",
+            f"Started: {format_ts('started_ts')}",
+            f"Finished: {format_ts('finished_ts')}",
+            "",
+            "Outputs:",
+            "\n".join(job.get("outputs") or []) or "(none)",
             "",
             "Metadata:",
             json.dumps(meta, indent=2) if meta else "(none)",
             "",
-            f"Workdir: {job['workdir']}",
-            f"Stdout: {job['stdout_log']}",
-            f"Stderr: {job['stderr_log']}",
+            "Stdout:",
+            (job.get("stdout") or "(none)").strip(),
+            "",
+            "Stderr:",
+            (job.get("stderr") or "(none)").strip(),
         ]
         self.query_one("#job-body", Static).update("\n".join(lines))
         self._start_stream()

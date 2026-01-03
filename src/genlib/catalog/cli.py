@@ -77,6 +77,22 @@ def catalog_cli(parser):
     build.add_argument("--output", default=None)
     build.add_argument("--no-hash", action="store_true")
     build.add_argument("--no-validate", action="store_true")
+    build.add_argument(
+        "--civit-limit",
+        type=int,
+        default=None,
+        help="Max assets to prefetch CivitAI cards for (default: unlimited)",
+    )
+    build.add_argument(
+        "--civit-tags",
+        default=None,
+        help="Comma-separated tags to filter which assets get CivitAI prefetch",
+    )
+    build.add_argument(
+        "--civit-base",
+        default=None,
+        help="Only prefetch CivitAI cards for assets whose metadata base_model matches",
+    )
     build.set_defaults(func=build_cmd)
 
     search = sub.add_parser("search", help="Search local catalog")
@@ -98,7 +114,17 @@ def catalog_cli(parser):
 def build_cmd(args):
     root = Path(args.root).expanduser().resolve()
     out = Path(args.output).expanduser().resolve() if args.output else (root / "catalog.json")
-    cat = build_catalog(root, include_hash=(not args.no_hash), validate=(not args.no_validate))
+    civit_tags = None
+    if args.civit_tags:
+        civit_tags = [t.strip().lower() for t in args.civit_tags.split(",") if t.strip()]
+    cat = build_catalog(
+        root,
+        include_hash=(not args.no_hash),
+        validate=(not args.no_validate),
+        civit_prefetch_limit=args.civit_limit,
+        civit_prefetch_tags=civit_tags,
+        civit_prefetch_base=args.civit_base,
+    )
     dump_json(out, cat)
     print(f"✅ Catalog generated: {out}")
     # surface validation issues count

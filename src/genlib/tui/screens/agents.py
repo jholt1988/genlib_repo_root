@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
+import threading
+from pathlib import Path
 from typing import Any
 
 from textual.binding import Binding
@@ -8,13 +11,14 @@ from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Button, Input, Static
 
+from genlib.engines.remote import CivitAIClient
 from genlib.orchestrator import Orchestrator, OrchestrationError
 from genlib.tui.services.backend_client import BackendClient
 
 
 DEFAULT_PLANNERS = [
     p.strip()
-    for p in os.environ.get("GENLIB_AGENT_PLANNERS", "rule").split(",")
+    for p in os.environ.get("GENLIB_AGENT_PLANNERS", "openai,rule,ollama").split(",")
     if p.strip()
 ]
 
@@ -45,6 +49,10 @@ class AgentScreen(Screen):
         )
         self._backend = BackendClient()
         self._selected_plan: dict[str, Any] | None = None
+        token = os.environ.get("CIVITAI_TOKEN") or os.environ.get("CIVITAI_API_KEY")
+        self._civit_client = CivitAIClient(token=token)
+        self._civit_cache: dict[str, Dict[str, Any]] = {}
+        self._stacks_dir = Path(DEFAULT_STACKS_DIR).expanduser()
 
     def compose(self):
         with Vertical():
@@ -64,6 +72,8 @@ class AgentScreen(Screen):
             yield Input(placeholder="forge directory (when engine=forge)", id="agent-forge")
             yield Button("Run plan", id="agent-run")
             yield Static("", id="agent-run-status")
+            yield Static("CivitAI card", id="agent-civit-title")
+            yield Static("Plan a stack to see CivitAI details.", id="agent-civit-card")
 
     def on_mount(self):
         self.query_one("#agent-text", Input).focus()
@@ -111,6 +121,7 @@ class AgentScreen(Screen):
         self._selected_plan = selected
         self.query_one("#agent-out", Input).value = selected.get("out") or ""
         self.query_one("#agent-run-status", Static).update("Plan ready to run.")
+        self._update_agent_civit(selected.get("stack"))
 
         lines: list[str] = [
             f"[bold]Selected plan[/bold] (planner={selected.get('planner','?')}):",
@@ -148,6 +159,71 @@ class AgentScreen(Screen):
 
     def action_run_plan(self):
         self._run_selected_plan()
+
+    def _load_stack_metadata(self, stack_name: str) -> dict[str, Any] | None:
+        path = (self._stacks_dir / f"{stack_name}.json").resolve()
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _update_agent_civit(self, stack_name: str | None):
+        card_static = self.query_one("#agent-civit-card", Static)
+        if not stack_name:
+            card_static.update("No stack selected.")
+            return
+        metadata = self._load_stack_metadata(stack_name)
+        civit_meta = (metadata or {}).get("civitai") or {}
+        card = (metadata or {}).get("civit_card") or civit_meta.get("card")
+        if card:
+            self._render_agent_civit(card)
+            return
+        model_id = civit_meta.get("model_id")
+        if not model_id:
+            card_static.update("No CivitAI information for this stack.")
+            return
+        cached = self._civit_cache.get(str(model_id))
+        if cached:
+            self._render_agent_civit(cached)
+            return
+
+        card_static.update("Fetching CivitAI info...")
+
+        def fetch():
+            try:
+                info = self._civit_client.get_model(str(model_id))
+            except Exception as exc:
+                info = {"error": str(exc)}
+
+            def finish():
+                self._civit_cache[str(model_id)] = info
+                self._render_agent_civit(info)
+
+            self.call_from_thread(finish)
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _render_agent_civit(self, card: dict[str, Any]):
+        card_static = self.query_one("#agent-civit-card", Static)
+        if card.get("error"):
+            card_static.update(f"[red]{card['error']}[/red]")
+            return
+        lines = [
+            f"Model: {card.get('name') or card.get('model_id')}",
+            f"CivitAI ID: {card.get('model_id') or card.get('id')}",
+            f"Rating: {card.get('rating') or 'n/a'} ({card.get('ratingCount') or 0} votes)",
+            f"Downloads: {card.get('downloadCount', 'n/a')}, Favorites: {card.get('favoriteCount', 'n/a')}",
+            f"URL: {card.get('url') or card.get('modelUrl')}",
+        ]
+        desc = card.get("description")
+        if desc:
+            lines.append(f"Description: {desc.strip().splitlines()[0][:120]}{'...' if len(desc) > 120 else ''}")
+        cover = card.get("cover_url") or card.get("imageUrl")
+        if cover:
+            lines.append(f"Cover: {cover}")
+        card_static.update("\n".join(lines))
 
     def _run_selected_plan(self):
         status = self.query_one("#agent-run-status", Static)

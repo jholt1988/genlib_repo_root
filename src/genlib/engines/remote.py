@@ -427,4 +427,33 @@ def download_cmd(args):
         raise
 
     # Print a suggestion to the user where the file was saved and what they may want to do next.
+    metadata = scaffold_metadata(model)
+    civitai_meta = metadata.get("civitai", {})
+    civitai_meta.update({
+        "model_id": model.get("id"),
+        "url": model.get("url"),
+        "version_id": version.get("id"),
+        "cover_url": (version.get("images") or [{}])[0].get("url") if (version.get("images")) else None,
+        "author": (model.get("user") or {}).get("username"),
+    })
+    metadata["civitai"] = civitai_meta
+
+    meta_path = dest.with_suffix(".json")
+    if meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text(encoding="utf-8"))
+            existing_civit = existing.get("civitai", {})
+        except Exception:
+            existing = {}
+            existing_civit = {}
+    else:
+        existing = {}
+        existing_civit = {}
+
+    merged = {**existing, **metadata}
+    merged_civit = {**existing_civit, **civitai_meta}
+    merged["civitai"] = merged_civit
+    meta_path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    print(f"? Catalog metadata written to {meta_path}")
+
     print(f"Model '{model.get('name')}' (type={mtype}) version {version.get('id')} saved to {dest}")

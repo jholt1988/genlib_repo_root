@@ -1,9 +1,11 @@
 from __future__ import annotations
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from genlib.engines.remote import CivitAIClient
 from genlib.utils import dump_json, load_json, env_default, DEFAULT_FORGE_MODELS_DIR, BASE_MODEL_TO_NS, sha256
 from genlib.schemas.base import validate_metadata
 
@@ -22,8 +24,58 @@ def _namespace(md: Optional[Dict]) -> str:
     base = md.get("base_model")
     return BASE_MODEL_TO_NS.get(base, "unknown")
 
-def build_catalog(root: Path, *, include_hash: bool = True, validate: bool = True) -> Dict:
+def _should_prefetch_metadata(
+    md: Optional[Dict[str, Any]],
+    tags: list[str] | None,
+    base: str | None,
+) -> bool:
+    if not md:
+        return False
+    if base:
+        base_model = (md.get("base_model") or "").lower()
+        if base_model != base.lower():
+            return False
+    if tags:
+        asset_tags = [str(t).lower() for t in (md.get("tags") or [])]
+        if not any(tag in asset_tags for tag in tags):
+            return False
+    return True
+
+
+def _civit_card(client: CivitAIClient, model_id: str) -> Dict[str, Any] | None:
+    try:
+        card = client.get_model(model_id)
+    except Exception:
+        return None
+    versions = card.get("modelVersions") or []
+    version = versions[0] if versions else {}
+    stats = card.get("stats") or {}
+    return {
+        "model_id": card.get("id"),
+        "name": card.get("name"),
+        "cover_url": (version.get("images") or [{}])[0].get("url") if version else None,
+        "description": card.get("description") or card.get("summary"),
+        "downloadCount": stats.get("downloadCount"),
+        "favoriteCount": stats.get("favoriteCount"),
+        "rating": stats.get("rating"),
+        "ratingCount": stats.get("ratingCount"),
+        "url": card.get("url"),
+    }
+
+
+def build_catalog(
+    root: Path,
+    *,
+    include_hash: bool = True,
+    validate: bool = True,
+    civit_prefetch_limit: int | None = None,
+    civit_prefetch_tags: list[str] | None = None,
+    civit_prefetch_base: str | None = None,
+) -> Dict:
     assets: List[Dict] = []
+    token = os.environ.get("CIVITAI_TOKEN") or os.environ.get("CIVITAI_API_KEY")
+    client = CivitAIClient(token=token) if token else None
+    _prefetched_count = 0
     for p in root.rglob("*"):
         if not (p.is_file() and p.suffix.lower() in ASSET_EXTENSIONS):
             continue
@@ -45,6 +97,17 @@ def build_catalog(root: Path, *, include_hash: bool = True, validate: bool = Tru
         aid = _stem(p)
         ns = _namespace(md)
         aref = f"{ns}:{aid}" if ns != "unknown" else aid
+
+        if client and md:
+            civitai_md = md.get("civitai") or {}
+            model_id = civitai_md.get("model_id") or civitai_md.get("modelId")
+            if model_id:
+                if _should_prefetch_metadata(md, civit_prefetch_tags, civit_prefetch_base):
+                    if civit_prefetch_limit is None or _prefetched_count < civit_prefetch_limit:
+                        card = _civit_card(client, str(model_id))
+                        if card:
+                            md["civit_card"] = card
+                            _prefetched_count += 1
 
         assets.append({
             "id": aid,
