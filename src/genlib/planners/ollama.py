@@ -5,6 +5,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
 from genlib.planners.base import Plan
+from genlib.stack.run import suggest_models_for_stack
 
 SYSTEM = """You are a planning assistant for a CLI that runs Stable Diffusion Forge via reusable stack files.
 Return ONLY valid JSON matching this schema:
@@ -59,13 +60,31 @@ class OllamaPlanner:
             raise RuntimeError("Ollama response missing message.content")
 
         data = json.loads(content)
+        stack = data.get("stack", "portrait_base")
+        model_suggestions = None
+        model_suggestion_error: str | None = None
+        try:
+            model_suggestions = suggest_models_for_stack(
+                stack,
+                stacks_dir=stacks_dir,
+                presets=data.get("presets") or [],
+                vars=data.get("vars") or {},
+            )
+        except Exception as exc:
+            model_suggestion_error = str(exc)
         return Plan(
             text=text,
-            stack=data.get("stack", "portrait_base"),
+            stack=stack,
             presets=data.get("presets") or [],
             vars=data.get("vars") or {},
             constraints=data.get("constraints") or {"safe": True},
             out=data.get("out"),
             count=int(data.get("count", 1) or 1),
-            meta={"planner": "ollama", "model": self.model, "host": self.host}
+            meta={
+                "planner": "ollama",
+                "model": self.model,
+                "host": self.host,
+                **({"model_suggestions": model_suggestions} if model_suggestions else {}),
+                **({"model_suggestion_error": model_suggestion_error} if model_suggestion_error else {}),
+            }
         )

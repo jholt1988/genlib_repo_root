@@ -9,6 +9,7 @@ import requests
 from dotenv import load_dotenv
 
 from genlib.planners.base import Plan
+from genlib.stack.run import suggest_models_for_stack
 
 env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(env_path)
@@ -73,15 +74,32 @@ class OpenAIPlanner:
             raise RuntimeError("OpenAI response missing text content")
 
         result = json.loads(content)
+        stack = result.get("stack", "portrait_base")
+        model_suggestions = None
+        model_suggestion_error: str | None = None
+        try:
+            model_suggestions = suggest_models_for_stack(
+                stack,
+                stacks_dir=stacks_dir,
+                presets=result.get("presets") or [],
+                vars=result.get("vars") or {},
+            )
+        except Exception as exc:
+            model_suggestion_error = str(exc)
         return Plan(
             text=text,
-            stack=result.get("stack", "portrait_base"),
+            stack=stack,
             presets=result.get("presets") or [],
             vars=result.get("vars") or {},
             constraints=result.get("constraints") or {"safe": True},
             out=result.get("out"),
             count=int(result.get("count", 1) or 1),
-            meta={"planner": "openai", "model": self.model},
+            meta={
+                "planner": "openai",
+                "model": self.model,
+                **({"model_suggestions": model_suggestions} if model_suggestions else {}),
+                **({"model_suggestion_error": model_suggestion_error} if model_suggestion_error else {}),
+            },
         )
 
     def _extract_content(self, response: Dict[str, Any]) -> str | None:

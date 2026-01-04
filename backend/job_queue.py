@@ -16,11 +16,8 @@ from genlib.engines.forge_api import (
     invoke_txt2img,
     save_images,
 )
-from genlib.presets import load_presets, PresetError
-from genlib.stack.cli import resolve_stack
-from genlib.stack.schema import validate_stack
+from genlib.stack.run import resolve_stack_document
 from genlib.utils import DEFAULT_FORGE_MODELS_DIR, env_default
-from genlib.vars import resolve_vars, VarError
 
 Job = Dict[str, Any]
 
@@ -119,7 +116,12 @@ class JobQueue:
                 self.q.task_done()
 
     def _execute_stack_job(self, jid: str, job: Job):
-        resolved_doc = self._resolve_stack_document(job)
+        resolved_doc = resolve_stack_document(
+            job.get("stack"),
+            stacks_dir=job.get("stacks_dir") or DEFAULT_STACKS_DIR,
+            presets=job.get("presets"),
+            vars=job.get("vars"),
+        )
         models_root = Path(job.get("models_root") or DEFAULT_MODELS_ROOT).expanduser().resolve()
         catalog_path = job.get("catalog_path") or DEFAULT_CATALOG_PATH
         catalog_file, created = ensure_catalog(models_root, catalog_path)
@@ -153,36 +155,6 @@ class JobQueue:
         job["status"] = "completed"
         job["finished_ts"] = time.time()
         self._log(jid, "Job completed")
-
-    def _resolve_stack_document(self, job: Job) -> Dict[str, Any]:
-        stacks_dir = job.get("stacks_dir") or DEFAULT_STACKS_DIR
-        stacks_path = Path(stacks_dir).expanduser().resolve()
-        stack_name = job.get("stack")
-        if not stack_name:
-            raise RuntimeError("stack missing in job data")
-        doc, _ = resolve_stack(stacks_path, stack_name)
-        errs = validate_stack(doc)
-        if errs:
-            raise RuntimeError("stack invalid: " + "; ".join(errs))
-
-        values: Dict[str, Any] = {}
-        for preset in job.get("presets") or []:
-            try:
-                values.update(load_presets(doc, preset))
-            except PresetError as exc:
-                raise RuntimeError(f"preset '{preset}' invalid: {exc}") from exc
-
-        vars_block = job.get("vars") or {}
-        if not isinstance(vars_block, dict):
-            raise RuntimeError("vars must be an object")
-        values.update(vars_block)
-
-        try:
-            docs, _ = resolve_vars(doc, values)
-        except VarError as exc:
-            raise RuntimeError(f"vars invalid: {exc}") from exc
-
-        return docs[0]
 
     def _log(self, jid: str, message: str):
         if jid not in self.logs:

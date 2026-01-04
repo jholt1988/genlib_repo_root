@@ -40,6 +40,14 @@ class Orchestrator:
                         "count": plan.count,
                     }
                 }
+                if plan.meta:
+                    plan_dict["meta"] = plan.meta
+                    suggestions = plan.meta.get("model_suggestions")
+                    if suggestions:
+                        plan_dict["model_suggestions"] = suggestions
+                    error = plan.meta.get("model_suggestion_error")
+                    if error:
+                        plan_dict["model_suggestion_error"] = error
                 trace["candidates"].append(plan_dict)
             except Exception as e:
                 trace["rejected"].append({"planner": p_name, "reason": str(e)})
