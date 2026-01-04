@@ -1,8 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
+
+from genlib.catalog.utils import ensure_catalog
+from genlib.engines.forge_api import (
+    DEFAULT_FORGE_API_URL,
+    build_txt2img_payload,
+    invoke_txt2img,
+    save_images,
+)
+from genlib.presets import load_presets, PresetError
+from genlib.utils import load_json
+from genlib.vars import resolve_vars, VarError
 
 STACKS_DIR = Path("stacks")
 CMF_FILE = Path("genlib.cmf.json")
@@ -36,23 +48,78 @@ def build_cmd(args: Any) -> None:
     print(json.dumps(stack, indent=2))
 
 
-def run_cmd(args: Any) -> None:
-    print("Running stack:")
-    print(f"  name   = {args.name}")
-    print(f"  engine = {args.engine}")
-
+def _parse_vars(args) -> Dict[str, Any]:
+    values: Dict[str, Any] = {}
     if args.vars:
-        print("  vars:")
-        for v in args.vars:
-            print(f"    - {v}")
+        source = Path(args.vars).expanduser()
+        if not source.exists():
+            raise SystemExit(f"vars file not found: {source}")
+        data = load_json(source)
+        if not isinstance(data, dict):
+            raise SystemExit("--vars file must contain a JSON object")
+        values.update(data)
+    for raw in (args.var or []):
+        if "=" not in raw:
+            raise SystemExit(f"invalid --var '{raw}' (expected NAME=VALUE)")
+        name, value = raw.split("=", 1)
+        values[name] = value
+    return values
 
-    if args.out:
-        print(f"  out    = {args.out}")
 
-    if args.engine == "forge":
-        if not args.forge_dir:
-            raise SystemExit("--forge-dir is required when engine=forge")
-        print(f"  forge  = {args.forge_dir}")
+def run_cmd(args: Any) -> None:
+    stacks_dir = Path(args.dir).expanduser().resolve()
+    doc, _ = resolve_stack(stacks_dir, args.name)
+    errs = validate_stack(doc)
+    if errs:
+        raise SystemExit("Invalid stack: " + "; ".join(errs))
+
+    values = {}
+    for preset in args.preset or []:
+        try:
+            values.update(load_presets(doc, preset))
+        except PresetError as exc:
+            raise SystemExit(f"invalid preset '{preset}': {exc}")
+    values.update(_parse_vars(args))
+
+    try:
+        docs, _ = resolve_vars(doc, values)
+    except VarError as exc:
+        raise SystemExit(f"vars invalid: {exc}")
+
+    models_root = Path(args.root).expanduser().resolve()
+    catalog_file, catalog_created = ensure_catalog(models_root, args.catalog)
+    if catalog_created:
+        print(f"🗂️  Built catalog at {catalog_file}")
+
+    base_doc = docs[0]
+    result = compose_from_stack(
+        base_doc,
+        models_root=str(models_root),
+        catalog_path=str(catalog_file),
+        explain=args.explain,
+    )
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return
+
+    print(f"✔ Stack '{args.name}' composed ({base_doc.get('intent')})")
+    print(f"Prompt: {result.get('positive_prompt')}")
+    print(f"Negative: {result.get('negative_prompt')}")
+    print("Params:", json.dumps(result.get("params") or {}, indent=2))
+
+    if args.engine != "forge":
+        print("Engine set to 'none'; skipping execution.")
+        return
+
+    forge_url = os.environ.get("FORGE_API_URL", DEFAULT_FORGE_API_URL)
+    payload = build_txt2img_payload(result, count=1, seed=args.seed)
+    print(f"Running against {forge_url} …")
+    data = invoke_txt2img(forge_url, payload)
+    saved = save_images(data.get("images") or [], Path(args.out or f"outputs/{args.name}"))
+    print(f"Saved {len(saved)} image(s) to {saved[0].parent if saved else Path(args.out or 'outputs')}:")
+    for p in saved:
+        print(f"  - {p}")
 
 def new_cmd(args: Any) -> None:
     STACKS_DIR.mkdir(exist_ok=True)

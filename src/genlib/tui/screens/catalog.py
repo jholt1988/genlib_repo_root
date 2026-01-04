@@ -10,6 +10,10 @@ from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Input, Static
+from rich.columns import Columns
+from rich.console import Group
+from rich.panel import Panel
+from rich.text import Text
 
 try:
     from rich.image import Image
@@ -39,6 +43,8 @@ class CatalogScreen(Screen):
 
     def __init__(self):
         super().__init__()
+        self._preview_assets: list[Dict[str, Any]] = []
+        self._preview_cover_fetching: set[str] = set()
         self._assets: list[Dict[str, Any]] = []
         self._row_map: dict[Any, Dict[str, Any]] = {}
         token = os.environ.get("CIVITAI_TOKEN") or os.environ.get("CIVITAI_API_KEY")
@@ -74,6 +80,7 @@ class CatalogScreen(Screen):
                 yield Static("", id="catalog-cover")
                 with ScrollableContainer(id="catalog-detail-scroll"):
                     yield Static("Select an asset to see details", id="catalog-detail")
+                    yield Static("", id="catalog-preview-grid")
 
     def on_mount(self):
         filter_input = self.query_one("#catalog-filter", Input)
@@ -111,6 +118,7 @@ class CatalogScreen(Screen):
         needle = (query or "").strip().lower()
         first_key: str | None = None
         matches = 0
+        displayed: list[Dict[str, Any]] = []
         for asset in sorted(self._assets, key=lambda a: a.get("ref") or ""):
             if needle:
                 haystack = " ".join(
@@ -141,6 +149,8 @@ class CatalogScreen(Screen):
             matches += 1
             if first_key is None:
                 first_key = row_key
+            if len(displayed) < 6:
+                displayed.append(asset)
 
         status = self.query_one("#catalog-status", Static)
         status.update(f"{matches} assets displayed (filter: {needle or 'none'})")
@@ -149,6 +159,8 @@ class CatalogScreen(Screen):
             self._update_detail(self._row_map[first_key])
         else:
             self._clear_detail()
+        self._preview_assets = displayed
+        self._render_preview_grid()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
         asset = self._row_map.get(event.row_key)
@@ -285,3 +297,67 @@ class CatalogScreen(Screen):
             self.call_from_thread(done)
 
         threading.Thread(target=render_cover, daemon=True).start()
+
+    def _render_preview_grid(self):
+        preview = self.query_one("#catalog-preview-grid", Static)
+        assets = self._preview_assets or self._assets
+        panels = []
+        for asset in assets[:6]:
+            metadata = asset.get("metadata") or {}
+            civit_meta = metadata.get("civitai") or {}
+            card = metadata.get("civit_card") or civit_meta
+            cover = self._preview_cover_render(card)
+            text_lines = [
+                Text(f"{asset.get('ref')}", style="bold"),
+                Text(f"{card.get('name') or card.get('model_id') or 'unknown'}"),
+                Text(f"Rating: {card.get('rating') or 'n/a'} ({card.get('ratingCount') or 0} votes)"),
+                Text(f"Downloads: {card.get('downloadCount', 'n/a')}, Favorites: {card.get('favoriteCount', 'n/a')}"),
+                Text(f"URL: {card.get('url') or civit_meta.get('modelUrl') or ''}", style="link"),
+            ]
+            if card.get("description"):
+                desc = card["description"].strip().splitlines()[0]
+                text_lines.append(Text(desc[:140] + ("…" if len(desc) > 140 else "")))
+            panel = Panel(
+                Group(cover, *text_lines),
+                title=asset.get("filename"),
+                width=32,
+                border_style="cyan",
+            )
+            panels.append(panel)
+        if not panels:
+            preview.update("No previews available.")
+            return
+        preview.update(Columns(panels, equal=True, expand=True))
+
+    def _preview_cover_render(self, card: dict[str, Any]):
+        cover_url = card.get("cover_url") or card.get("imageUrl")
+        if not cover_url:
+            return Text("(no cover)", style="dim")
+        cached = self._cover_cache.get(cover_url)
+        if cached:
+            return cached
+        if Image is None:
+            return Text(f"[link={cover_url}]Cover[/link]")
+        self._fetch_preview_cover(cover_url)
+        return Text("Loading cover…", style="italic dim")
+
+    def _fetch_preview_cover(self, url: str):
+        if url in self._preview_cover_fetching:
+            return
+        self._preview_cover_fetching.add(url)
+
+        def run():
+            try:
+                img = Image.from_url(url, width=24)
+            except Exception:
+                img = Text(f"[link={url}]Cover[/link]")
+            else:
+                self._cover_cache[url] = img
+
+            def finish():
+                self._preview_cover_fetching.discard(url)
+                self._render_preview_grid()
+
+            self.call_from_thread(finish)
+
+        threading.Thread(target=run, daemon=True).start()

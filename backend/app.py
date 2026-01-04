@@ -10,8 +10,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from genlib.orchestrator import Orchestrator, OrchestrationError
 from job_queue import JobQueue
+
+STACKS_DIR = Path(os.environ.get("GENLIB_STACKS_DIR", "stacks")).expanduser().resolve()
 OUTPUTS_ROOT = Path(os.environ.get("GENLIB_OUTPUTS_ROOT", "outputs")).expanduser().resolve()
+DEFAULT_AGENT_PLANNERS = [
+    p.strip()
+    for p in os.environ.get("GENLIB_AGENT_PLANNERS", "openai,rule,ollama").split(",")
+    if p.strip()
+]
+if not DEFAULT_AGENT_PLANNERS:
+    DEFAULT_AGENT_PLANNERS = ["rule"]
+DEFAULT_AGENT_STACKS_DIR = os.environ.get("GENLIB_AGENT_STACKS_DIR", "stacks")
+DEFAULT_AGENT_HYBRID_BACKEND = os.environ.get("GENLIB_AGENT_HYBRID_BACKEND", "openai")
 
 app = FastAPI(title="genlib-web", version="2.4.0")
 app.add_middleware(
@@ -43,7 +55,11 @@ class StackRun(BaseModel):
 
 class AgentRun(BaseModel):
     text: str
-    planners: List[str] = ["rule", "openai", "ollama"]
+    planners: List[str] | None = None
+    hybrid_backend: str | None = None
+    stacks_dir: str | None = None
+    models_root: str | None = None
+    catalog_path: str | None = None
     out: str | None = None
     engine: str = "forge"
     forge_dir: str | None = None
@@ -75,7 +91,39 @@ def run_stack(req: StackRun):
 
 @app.post("/api/agent/run")
 def run_agent(req: AgentRun):
-    raise HTTPException(501, "agent endpoint is not supported by this backend")
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    planners = req.planners or DEFAULT_AGENT_PLANNERS
+    orch = Orchestrator(
+        planners,
+        stacks_dir=req.stacks_dir or DEFAULT_AGENT_STACKS_DIR,
+        hybrid_backend=req.hybrid_backend or DEFAULT_AGENT_HYBRID_BACKEND,
+    )
+    try:
+        trace = orch.run(text)
+    except OrchestrationError as exc:
+        raise HTTPException(400, str(exc))
+    selected = trace.get("selected")
+    if not selected:
+        raise HTTPException(400, "No plan selected")
+
+    job_data: Dict[str, Any] = {
+        "type": "stack",
+        "stack": selected.get("stack"),
+        "presets": list(selected.get("presets") or []),
+        "vars": dict(selected.get("vars") or {}),
+        "out": req.out or selected.get("out"),
+        "engine": req.engine,
+        "forge_dir": req.forge_dir,
+        "count": selected.get("count") or 1,
+    }
+    if req.models_root:
+        job_data["models_root"] = req.models_root
+    if req.catalog_path:
+        job_data["catalog_path"] = req.catalog_path
+    jid = queue.submit(job_data)
+    return {"job_id": jid, "plan": selected, "trace": trace}
 
 
 @app.get("/api/jobs")

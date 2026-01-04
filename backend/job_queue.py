@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import os
 import queue
 import threading
@@ -9,13 +8,18 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Generator
 
-import requests
-
-from genlib.catalog.index import build_catalog
+from genlib.catalog.utils import ensure_catalog
+from genlib.compose import compose_from_stack
+from genlib.engines.forge_api import (
+    DEFAULT_FORGE_API_URL,
+    build_txt2img_payload,
+    invoke_txt2img,
+    save_images,
+)
 from genlib.presets import load_presets, PresetError
 from genlib.stack.cli import resolve_stack
 from genlib.stack.schema import validate_stack
-from genlib.utils import DEFAULT_FORGE_MODELS_DIR, dump_json, env_default
+from genlib.utils import DEFAULT_FORGE_MODELS_DIR, env_default
 from genlib.vars import resolve_vars, VarError
 
 Job = Dict[str, Any]
@@ -23,7 +27,7 @@ Job = Dict[str, Any]
 DEFAULT_STACKS_DIR = os.environ.get("GENLIB_STACKS_DIR", "stacks")
 DEFAULT_MODELS_ROOT = env_default("GENLIB_MODELS_DIR", DEFAULT_FORGE_MODELS_DIR)
 DEFAULT_CATALOG_PATH = os.environ.get("GENLIB_CATALOG_PATH")
-DEFAULT_FORGE_API_URL = os.environ.get("FORGE_API_URL", "http://127.0.0.1:7860")
+DEFAULT_FORGE_URL = os.environ.get("FORGE_API_URL", DEFAULT_FORGE_API_URL)
 
 
 class JobQueue:
@@ -32,7 +36,7 @@ class JobQueue:
         self.jobs: Dict[str, Job] = {}
         self.logs: Dict[str, queue.Queue[str]] = {}
         self.outputs_root = outputs_root
-        self.forge_api_url = forge_url or DEFAULT_FORGE_API_URL
+        self.forge_api_url = forge_url or DEFAULT_FORGE_URL
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
 
@@ -115,43 +119,40 @@ class JobQueue:
                 self.q.task_done()
 
     def _execute_stack_job(self, jid: str, job: Job):
-        try:
-            resolved_doc = self._resolve_stack_document(job)
-            models_root = Path(job.get("models_root") or DEFAULT_MODELS_ROOT).expanduser().resolve()
-            catalog_path = job.get("catalog_path") or DEFAULT_CATALOG_PATH
-            catalog_file = self._resolve_catalog_file(jid, models_root, catalog_path)
-            result = compose_from_stack(
-                resolved_doc,
-                models_root=str(models_root),
-                catalog_path=str(catalog_file) if catalog_file else None,
-                explain=False,
-            )
-            payload = self._build_txt2img_payload(job, result)
-            self._log(jid, f"Calling AUTOMATIC1111 API ({self.forge_api_url})")
-            resp = requests.post(
-                f"{self.forge_api_url.rstrip('/')}/sdapi/v1/txt2img",
-                json=payload,
-                timeout=120,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            images = data.get("images") or []
-            saved = self._save_images(jid, images)
-            job["outputs"] = saved
-            job["meta"] = {
-                "prompt": payload.get("prompt"),
-                "negative_prompt": payload.get("negative_prompt"),
-                "params": payload,
-                "api_info": data.get("info"),
-            }
-            job["stdout"] += f"Saved {len(saved)} image(s)\n"
-            job["returncode"] = 0
-            job["status"] = "completed"
-            job["finished_ts"] = time.time()
-            self._log(jid, "Job completed")
-        except Exception as exc:
-            self._log(jid, f"Execution failed: {exc}")
-            raise
+        resolved_doc = self._resolve_stack_document(job)
+        models_root = Path(job.get("models_root") or DEFAULT_MODELS_ROOT).expanduser().resolve()
+        catalog_path = job.get("catalog_path") or DEFAULT_CATALOG_PATH
+        catalog_file, created = ensure_catalog(models_root, catalog_path)
+        if created:
+            self._log(jid, f"Catalog built at {catalog_file}")
+        self._log(jid, f"Composing stack {resolved_doc.get('name')}")
+        result = compose_from_stack(
+            resolved_doc,
+            models_root=str(models_root),
+            catalog_path=str(catalog_file),
+            explain=False,
+        )
+        payload = build_txt2img_payload(
+            result,
+            count=max(1, int(job.get("count") or 1)),
+            seed=job.get("seed"),
+        )
+        self._log(jid, f"Calling AUTOMATIC1111 API ({self.forge_api_url})")
+        data = invoke_txt2img(self.forge_api_url, payload)
+        images = data.get("images") or []
+        saved = save_images(images, self.outputs_root / jid)
+        job["outputs"] = [str(p) for p in saved]
+        job["meta"] = {
+            "prompt": payload.get("prompt"),
+            "negative_prompt": payload.get("negative_prompt"),
+            "params": payload,
+            "api_info": data.get("info"),
+        }
+        job["stdout"] += f"Saved {len(saved)} image(s)\n"
+        job["returncode"] = 0
+        job["status"] = "completed"
+        job["finished_ts"] = time.time()
+        self._log(jid, "Job completed")
 
     def _resolve_stack_document(self, job: Job) -> Dict[str, Any]:
         stacks_dir = job.get("stacks_dir") or DEFAULT_STACKS_DIR
@@ -182,61 +183,6 @@ class JobQueue:
             raise RuntimeError(f"vars invalid: {exc}") from exc
 
         return docs[0]
-
-    def _resolve_catalog_file(self, jid: str, models_root: Path, catalog_path: str | None) -> Path | None:
-        models_root.mkdir(parents=True, exist_ok=True)
-        if catalog_path:
-            path = Path(catalog_path).expanduser()
-        else:
-            path = models_root / "catalog.json"
-        if not path.exists():
-            self._log(jid, f"Building catalog at {path}")
-            catalog = build_catalog(models_root, include_hash=False, validate=False)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            dump_json(path, catalog)
-            self._log(jid, "Catalog build complete")
-        return path
-
-    def _build_txt2img_payload(self, job: Job, result: Dict[str, Any]) -> Dict[str, Any]:
-        params = result.get("params") or {}
-        steps = int(params.get("steps", 28))
-        cfg_scale = float(params.get("cfg_scale", params.get("cfg", 7.0)))
-        sampler = params.get("sampler") or params.get("sampler_name") or "Euler a"
-        width = int(params.get("width", 512))
-        height = int(params.get("height", 512))
-        count = max(1, int(job.get("count") or 1))
-        lora_tokens = " ".join(
-            f"<lora:{l['forge_id']}:{l['weight']}>" for l in (result.get("loras") or []) if l.get("forge_id")
-        )
-        positive = result.get("positive_prompt", "")
-        prompt = f"{lora_tokens} {positive}".strip() if positive or lora_tokens else ""
-
-        payload = {
-            "prompt": prompt,
-            "negative_prompt": result.get("negative_prompt", ""),
-            "steps": steps,
-            "cfg_scale": cfg_scale,
-            "sampler_name": sampler,
-            "width": width,
-            "height": height,
-            "seed": job.get("seed"),
-            "n_iter": count,
-            "batch_size": 1,
-        }
-        return {k: v for k, v in payload.items() if v not in (None, "")}
-
-    def _save_images(self, jid: str, images: list[str]) -> list[str]:
-        saved = []
-        out_dir = self.outputs_root / jid
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for idx, encoded in enumerate(images, start=1):
-            payload = encoded.split(",", 1)[1] if "," in encoded else encoded
-            data = base64.b64decode(payload)
-            target = out_dir / f"image_{idx:02d}.png"
-            target.write_bytes(data)
-        saved.append(str(target))
-            self._log(jid, f"Image saved: {target}")
-        return saved
 
     def _log(self, jid: str, message: str):
         if jid not in self.logs:
